@@ -22,6 +22,11 @@ canvas#game{position:fixed;inset:0;width:100%;height:100%;display:block}
 #score-box{right:16px;top:14px;text-align:right}
 #score{font-size:28px;font-weight:700;font-variant-numeric:tabular-nums;text-shadow:0 0 10px #000}
 #combo{font-size:15px;color:var(--orange);min-height:20px;font-weight:700;text-shadow:0 0 8px #000}
+#killfeed{display:flex;flex-direction:column;align-items:flex-end;gap:4px;margin-top:8px}
+.kf{background:rgba(7,12,22,.72);border-right:3px solid var(--orange);padding:4px 10px;font-size:13px;font-weight:700;letter-spacing:.06em;animation:kfin .18s ease-out}
+.kf b{color:var(--cold);font-weight:700}
+@keyframes kfin{from{opacity:0;transform:translateX(16px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.kf{animation:none}}
 #boss{left:50%;top:86px;transform:translateX(-50%);width:min(520px,70vw);text-align:center}
 #boss-name{font-size:13px;letter-spacing:.2em;color:#ff9ef5;margin-bottom:4px;text-shadow:0 0 8px #000}
 .bar{position:relative;height:10px;background:rgba(255,255,255,.12);border:1px solid var(--line);overflow:hidden}
@@ -71,7 +76,7 @@ button:hover,button:focus-visible{background:rgba(45,125,255,.35);border-color:v
 .big{font-size:56px;font-weight:800;color:var(--cold);margin:0;font-variant-numeric:tabular-nums}
 #error-text{color:var(--dim);max-width:560px;line-height:1.5}
 </style>
-<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"}}</script>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
 </head>
 <body>
 <canvas id="game"></canvas>
@@ -87,6 +92,7 @@ button:hover,button:focus-visible{background:rgba(45,125,255,.35);border-color:v
   <div id="score-box">
     <div id="score">0</div>
     <div id="combo"></div>
+    <div id="killfeed"></div>
   </div>
   <div id="boss" class="hidden">
     <div id="boss-name">TITAN</div>
@@ -127,6 +133,7 @@ button:hover,button:focus-visible{background:rgba(45,125,255,.35);border-color:v
       <label>FOV <span><input id="opt-fov" type="range" min="60" max="100" step="1"><output id="out-fov"></output></span></label>
       <label>Afficher les FPS <input id="opt-fps" type="checkbox"></label>
       <label>Qualité des ombres <select id="opt-shadows"><option value="0">Désactivées</option><option value="1024">Basse</option><option value="2048">Haute</option></select></label>
+      <label>Effets lumineux (bloom) <input id="opt-bloom" type="checkbox"></label>
     </div>
   </div>
   <button data-action="back">Retour</button>
@@ -166,11 +173,17 @@ button:hover,button:focus-visible{background:rgba(45,125,255,.35);border-color:v
 
 <script type="module">
 import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 /* ================= CONFIG : équilibrage ================= */
 const CONFIG = {
   loop: { step: 1 / 60, maxDelta: 0.05 },
-  render: { pixelRatio: 1.5, fogNear: 28, fogFar: 110, cullDistance: 60, wallHeight: 6 },
+  render: { pixelRatio: 1.5, fogNear: 30, fogFar: 120, cullDistance: 60, wallHeight: 6,
+    bloom: { strength: 0.6, radius: 0.45, threshold: 0.8 }, envIntensity: 0.35, girderY: 9 },
   map: { cell: 2, origin: -40, size: 40 },
   player: {
     hull: 100, shield: 100, walk: 6, sprint: 9, crouch: 3, accel: 14,
@@ -194,6 +207,9 @@ const CONFIG = {
       score: 100, glow: 0x6fe6ff, scale: 1 },
     sentinel: { hp: 40, speed: 2.5, radius: 0.4, bodyY: 1.0, bodyR: 0.45, headY: 1.6, headR: 0.2,
       score: 200, glow: 0xff7a3d, scale: 1, fireInterval: 1.5, damage: 8, accuracy: 0.7, minRange: 12, maxRange: 18 },
+    agent: { hp: 110, speed: 4.6, radius: 0.35, bodyY: 1.15, bodyR: 0.48, headY: 1.66, headR: 0.17,
+      score: 300, glow: 0x3dfff0, scale: 1, burst: 3, burstGap: 0.12, burstInterval: 1.3, damage: 9,
+      accuracy: 0.55, minRange: 7, maxRange: 20, strafeMin: 0.35, strafeMax: 0.9, shotSpeed: 70 },
     tank: { hp: 250, speed: 2.0, radius: 0.55, bodyY: 1.1, bodyR: 0.9, headY: 2.1, headR: 0.28,
       score: 500, glow: 0xffd23d, scale: 1, chargeSpeed: 7, chargeInterval: 6, chargeDamage: 35,
       knockback: 8, chargeTime: 1.5, windup: 0.6 },
@@ -208,12 +224,12 @@ const CONFIG = {
     hideTime: 2.5, patrolMul: 0.5, contactRange: 1.5, contactDps: 10, patrolRadius: 8, turnRate: 6, nearSense: 3
   },
   proj: { poolSize: 128, enemySpeed: 35, enemyDamage: 8, playerRadius: 0.35, lifetime: 2.5, trailInterval: 0.03 },
-  waves: { breakTime: 8, spawnGap: 0.5, bannerTime: 2, titanEvery: 5, sentinelFrom: 3, tankFrom: 5 },
+  waves: { breakTime: 8, spawnGap: 0.5, bannerTime: 2, titanEvery: 5, sentinelFrom: 3, tankFrom: 5, agentFrom: 2 },
   combo: { window: 4, tiers: [[3, 2], [6, 3], [9, 4]] },
   pickups: { repair: 25, shield: 50, poolSize: 12, bob: 0.12, dropLife: 20 },
   fx: { particles: 800, decals: 200, decalSize: 0.28, shells: 24, shellLife: 1.4, sparks: 14, burst: 36, titanBurst: 120 },
   audio: { music: 0.25, sfx: 0.6, loopSeconds: 16, storageKey: 'station-sigma-v1' },
-  defaults: { sens: 1, invert: false, music: 0.5, sfx: 0.8, fov: 75, fps: false, shadows: 1024 }
+  defaults: { sens: 1, invert: false, music: 0.5, sfx: 0.8, fov: 75, fps: false, shadows: 1024, bloom: true }
 };
 
 /* ================= Utilitaires ================= */
@@ -224,7 +240,10 @@ const rnd = (a, b) => a + Math.random() * (b - a);
 const DEG = Math.PI / 180;
 const MODE = { MENU: 0, PLAY: 1, PAUSE: 2, DEAD: 3 };
 const ST = { PATROL: 0, ALERT: 1, CHASE: 2, SEARCH: 3, ATTACK: 4, DISABLED: 5 };
-const ENEMY_TYPES = ['drone', 'sentinel', 'tank', 'titan'];
+const ENEMY_TYPES = ['drone', 'sentinel', 'tank', 'titan', 'agent'];
+/* Agents androïdes : nom et couleur de signature, façon jeu tactique */
+const AGENTS = [['VEX', 0x3dfff0], ['NOVA', 0xff4fa3], ['KAIRO', 0xffc23d], ['ONYX', 0x9d7bff], ['RIFT', 0x5dff7a], ['SOL', 0xff7a3d]];
+const TYPE_NAMES = { drone: 'DRONE', sentinel: 'SENTINELLE', tank: 'TANK', titan: 'TITAN' };
 const KIND = { FLOOR: 0, WALL: 1, PLAT: 2, BALC: 3, RAMP: 4, CRATE: 5 };
 const HALF_PI = Math.PI / 2;
 
@@ -614,6 +633,8 @@ function computePath(path, fromX, fromZ, toX, toZ) {
 
 /* ================= Rendu : renderer, textures procédurales, matériaux ================= */
 let renderer = null, scene = null, camera = null, sun = null, mapGroup = null;
+let composer = null, bloomPass = null;
+const decor = { holo: null, dust: null, planet: null, t: 0 };
 const mapGeoms = [];
 const mats = {};
 const texs = {};
@@ -729,6 +750,56 @@ function drawGlow(ctx, s) {
   ctx.fillRect(0, 0, s, s);
 }
 
+/* Normal map calculée depuis la luminance d'une texture canvas (Sobel) */
+function normalFrom(tex, strength) {
+  const src = tex.image, w = src.width, h = src.height;
+  const d = src.getContext('2d').getImageData(0, 0, w, h).data;
+  const cv = document.createElement('canvas');
+  cv.width = w;
+  cv.height = h;
+  const ctx = cv.getContext('2d');
+  const out = ctx.createImageData(w, h);
+  const lum = (x, y) => {
+    const i = (((y + h) % h) * w + ((x + w) % w)) * 4;
+    return (d[i] + d[i + 1] + d[i + 2]) / 765;
+  };
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const dx = (lum(x + 1, y) - lum(x - 1, y)) * strength;
+      const dy = (lum(x, y + 1) - lum(x, y - 1)) * strength;
+      const len = Math.hypot(dx, dy, 1);
+      const i = (y * w + x) * 4;
+      out.data[i] = (-dx / len * 0.5 + 0.5) * 255;
+      out.data[i + 1] = (dy / len * 0.5 + 0.5) * 255;
+      out.data[i + 2] = (1 / len * 0.5 + 0.5) * 255;
+      out.data[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(out, 0, 0);
+  const t = new THREE.CanvasTexture(cv);
+  t.wrapS = THREE.RepeatWrapping;
+  t.wrapT = THREE.RepeatWrapping;
+  t.anisotropy = 4;
+  return t;
+}
+function drawScreen(ctx, s) {
+  ctx.fillStyle = '#04121c';
+  ctx.fillRect(0, 0, s, s);
+  ctx.strokeStyle = '#3dd8ff';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  for (let x = 0; x <= s; x += 8) ctx.lineTo(x, s * 0.35 + Math.sin(x * 0.06) * 18 + rnd(-6, 6));
+  ctx.stroke();
+  ctx.fillStyle = '#ff8a2a';
+  for (let k = 0; k < 10; k++) ctx.fillRect(16 + k * 24, s * 0.9 - rnd(10, 70), 14, 200);
+  ctx.fillStyle = '#9fd8ff';
+  ctx.font = '600 22px monospace';
+  ctx.fillText('SIGMA-7 // REACTEUR 62%', 12, 30);
+  ctx.fillText('ALERTE : UNITES HOSTILES', 12, s * 0.58);
+  ctx.strokeStyle = 'rgba(159,216,255,0.25)';
+  ctx.lineWidth = 1;
+  for (let y = 0; y < s; y += 4) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(s, y); ctx.stroke(); }
+}
 function buildMaterials() {
   texs.floor = makeTexture(256, drawFloor);
   texs.panel = makeTexture(256, drawPanel);
@@ -737,10 +808,12 @@ function buildMaterials() {
   texs.crate = makeTexture(256, drawCrate);
   texs.decal = makeTexture(128, drawDecal);
   texs.glow = makeTexture(128, drawGlow);
-  mats.floor = new THREE.MeshStandardMaterial({ map: texs.floor, roughness: 0.75, metalness: 0.35, side: THREE.DoubleSide });
-  mats.wall = new THREE.MeshStandardMaterial({ map: texs.panel, roughness: 0.6, metalness: 0.5, side: THREE.DoubleSide });
-  mats.plat = new THREE.MeshStandardMaterial({ map: texs.metal, roughness: 0.5, metalness: 0.6, side: THREE.DoubleSide });
-  mats.balc = new THREE.MeshStandardMaterial({ map: texs.metal, color: 0xb8c4d8, roughness: 0.45, metalness: 0.6, side: THREE.DoubleSide });
+  texs.screen = makeTexture(256, drawScreen);
+  mats.floor = new THREE.MeshStandardMaterial({ map: texs.floor, normalMap: normalFrom(texs.floor, 6), roughness: 0.55, metalness: 0.6, side: THREE.DoubleSide });
+  mats.wall = new THREE.MeshStandardMaterial({ map: texs.panel, normalMap: normalFrom(texs.panel, 5), roughness: 0.5, metalness: 0.6, side: THREE.DoubleSide });
+  const metalNormal = normalFrom(texs.metal, 3);
+  mats.plat = new THREE.MeshStandardMaterial({ map: texs.metal, normalMap: metalNormal, roughness: 0.4, metalness: 0.75, side: THREE.DoubleSide });
+  mats.balc = new THREE.MeshStandardMaterial({ map: texs.metal, normalMap: metalNormal, color: 0xb8c4d8, roughness: 0.45, metalness: 0.6, side: THREE.DoubleSide });
   mats.glass = new THREE.MeshStandardMaterial({ map: texs.glass, transparent: true, opacity: 0.5, roughness: 0.1, metalness: 0.2, depthWrite: false, side: THREE.DoubleSide });
   mats.crate = new THREE.MeshStandardMaterial({ map: texs.crate, roughness: 0.8, metalness: 0.3, side: THREE.DoubleSide });
   mats.neonO = new THREE.MeshBasicMaterial({ color: 0xff8a2a, side: THREE.DoubleSide });
@@ -765,6 +838,19 @@ function buildMaterials() {
   mats.barBack = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.6, depthWrite: false });
   mats.barFill = new THREE.MeshBasicMaterial({ color: 0x7dffb0, depthWrite: false });
   mats.shock = new THREE.MeshBasicMaterial({ color: 0xff7bf0, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
+  /* Décor : poutres, conduites, barres lumineuses, écrans */
+  mats.girder = new THREE.MeshStandardMaterial({ map: texs.metal, normalMap: metalNormal, color: 0x8794aa, roughness: 0.35, metalness: 0.85 });
+  mats.pipe = new THREE.MeshStandardMaterial({ color: 0x2a3344, roughness: 0.3, metalness: 0.9 });
+  mats.lightbar = new THREE.MeshBasicMaterial({ color: 0x8fe4ff });
+  mats.screen = new THREE.MeshBasicMaterial({ map: texs.screen });
+  /* Intensité des reflets d'environnement, uniforme pour tous les métaux */
+  const tune = (m) => { if (m && m.isMeshStandardMaterial) m.envMapIntensity = CONFIG.render.envIntensity; };
+  for (const m of Object.values(mats)) {
+    if (m && m.isMaterial) tune(m);
+    else if (m) Object.values(m).forEach(tune);
+  }
+  mats.gunDark.envMapIntensity = 0.9;
+  mats.gunLight.envMapIntensity = 0.9;
 }
 
 /* ================= Géométrie fusionnée ================= */
@@ -781,6 +867,15 @@ class GeoBuilder {
       else this.uv.push(v[0] / 4, v[1] / 4);
     }
     this.ix.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  }
+  /* Pavé aligné sur les axes : six faces */
+  box(x0, y0, z0, x1, y1, z1) {
+    this.quad([x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0], 0, 1, 0);
+    this.quad([x0, y0, z1], [x0, y0, z0], [x1, y0, z0], [x1, y0, z1], 0, -1, 0);
+    this.quad([x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1], 1, 0, 0);
+    this.quad([x0, y0, z1], [x0, y1, z1], [x0, y1, z0], [x0, y0, z0], -1, 0, 0);
+    this.quad([x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1], 0, 0, 1);
+    this.quad([x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0], 0, 0, -1);
   }
   get empty() { return this.ix.length === 0; }
   build() {
@@ -804,6 +899,41 @@ function addTopQuad(b, i, x0, z0, x1, z1) {
   const len = Math.hypot(dhdx, 1, dhdz);
   b.quad([x0, h00, z0], [x0, h01, z1], [x1, h11, z1], [x1, h10, z0], -dhdx / len, 1 / len, -dhdz / len);
 }
+/* Habillage d'une face de mur : écrans, conduites, colonnes lumineuses (sans collision, collés au mur) */
+function decorateWallFace(B, e0, e1, nx, nz, seed) {
+  const h = seed % 13;
+  const ax = e0[0] + nx * 0.06, az = e0[1] + nz * 0.06, bx = e1[0] + nx * 0.06, bz = e1[1] + nz * 0.06;
+  const at = (t, off) => [lerp(ax, bx, t) + nx * off, lerp(az, bz, t) + nz * off];
+  if (h === 0 || h === 7) {
+    const [p0x, p0z] = at(0.15, 0), [p1x, p1z] = at(0.85, 0);
+    B.pipe.box(Math.min(p0x, p1x) - Math.abs(nx) * 0.05, 1.95, Math.min(p0z, p1z) - Math.abs(nz) * 0.05,
+      Math.max(p0x, p1x) + Math.abs(nx) * 0.05, 3.45, Math.max(p0z, p1z) + Math.abs(nz) * 0.05);
+    const [s0x, s0z] = at(0.2, 0.07), [s1x, s1z] = at(0.8, 0.07);
+    B.screen.quad([s0x, 2.05, s0z], [s1x, 2.05, s1z], [s1x, 3.35, s1z], [s0x, 3.35, s0z], nx, 0, nz);
+  } else if (h === 3 || h === 10) {
+    const [q0x, q0z] = at(0, 0), [q1x, q1z] = at(1, 0.22);
+    B.pipe.box(Math.min(q0x, q1x), 5.1, Math.min(q0z, q1z), Math.max(q0x, q1x), 5.32, Math.max(q0z, q1z));
+    B.pipe.box(Math.min(q0x, q1x), 5.45, Math.min(q0z, q1z), Math.max(q0x, q1x), 5.6, Math.max(q0z, q1z));
+  } else if (h === 5) {
+    const [c0x, c0z] = at(0.47, 0), [c1x, c1z] = at(0.53, 0.05);
+    B.lightbar.box(Math.min(c0x, c1x), 0.4, Math.min(c0z, c1z), Math.max(c0x, c1x), 3.9, Math.max(c0z, c1z));
+  }
+}
+/* Charpente au-dessus de la station : poutres, piliers sur le mur extérieur, rampes lumineuses */
+function buildGirders(B) {
+  const y = CONFIG.render.girderY, L = O, R = -O;
+  for (let k = 1; k < 10; k++) {
+    const z = O + k * 8;
+    B.girder.box(L, y, z - 0.3, R, y + 0.7, z + 0.3);
+    B.lightbar.box(L + 1, y - 0.08, z - 0.06, R - 1, y, z + 0.06);
+    B.girder.box(L, CONFIG.render.wallHeight, z - 0.4, L + 0.8, y + 0.7, z + 0.4);
+    B.girder.box(R - 0.8, CONFIG.render.wallHeight, z - 0.4, R, y + 0.7, z + 0.4);
+  }
+  for (let k = 1; k < 5; k++) {
+    const x = O + k * 16;
+    B.girder.box(x - 0.25, y + 0.7, L, x + 0.25, y + 1.2, R);
+  }
+}
 function buildMapMeshes() {
   if (mapGroup) {
     scene.remove(mapGroup);
@@ -811,7 +941,8 @@ function buildMapMeshes() {
   }
   mapGeoms.length = 0;
   mapGroup = new THREE.Group();
-  const B = { floor: new GeoBuilder(), wall: new GeoBuilder(), plat: new GeoBuilder(), balc: new GeoBuilder(),
+  const B = { girder: new GeoBuilder(), pipe: new GeoBuilder(), lightbar: new GeoBuilder(), screen: new GeoBuilder(),
+    floor: new GeoBuilder(), wall: new GeoBuilder(), plat: new GeoBuilder(), balc: new GeoBuilder(),
     crate: new GeoBuilder(), glass: new GeoBuilder(), neonO: new GeoBuilder(), neonB: new GeoBuilder() };
   const sideOf = { [KIND.WALL]: B.wall, [KIND.PLAT]: B.plat, [KIND.CRATE]: B.crate, [KIND.BALC]: B.glass };
   const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
@@ -846,10 +977,12 @@ function buildMapMeshes() {
             [e1[0] + nx * o, 4.5, e1[1] + nz * o], [e0[0] + nx * o, 4.5, e0[1] + nz * o], nx, 0, nz);
           B.neonB.quad([e0[0] + nx * o, 0.02, e0[1] + nz * o], [e1[0] + nx * o, 0.02, e1[1] + nz * o],
             [e1[0] + nx * o, 0.14, e1[1] + nz * o], [e0[0] + nx * o, 0.14, e0[1] + nz * o], nx, 0, nz);
+          decorateWallFace(B, e0, e1, nx, nz, c * 73 + r * 151);
         }
       }
     }
   }
+  buildGirders(B);
   const add = (b, mat, shadow) => {
     if (b.empty) return;
     const g = b.build();
@@ -867,6 +1000,10 @@ function buildMapMeshes() {
   add(B.glass, mats.glass, false);
   add(B.neonO, mats.neonO, false);
   add(B.neonB, mats.neonB, false);
+  add(B.girder, mats.girder, true);
+  add(B.pipe, mats.pipe, false);
+  add(B.lightbar, mats.lightbar, false);
+  add(B.screen, mats.screen, false);
   scene.add(mapGroup);
 }
 
@@ -878,15 +1015,19 @@ function initRenderer() {
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.05;
-  renderer.shadowMap.type = THREE.PCFShadowMap;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x05070d);
   scene.fog = new THREE.Fog(0x05070d, CONFIG.render.fogNear, CONFIG.render.fogFar);
   camera = new THREE.PerspectiveCamera(opts.fov, window.innerWidth / window.innerHeight, 0.05, 160);
   camera.rotation.order = 'YXZ';
   scene.add(camera);
-  scene.add(new THREE.HemisphereLight(0x9fc2ff, 0x243044, 1.5));
-  sun = new THREE.DirectionalLight(0xcfe3ff, 1.6);
+  /* Reflets : environnement préfiltré pour les métaux */
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  scene.environment = pmrem.fromScene(new RoomEnvironment(renderer), 0.04).texture;
+  pmrem.dispose();
+  scene.add(new THREE.HemisphereLight(0x9fc2ff, 0x1c2433, 0.9));
+  sun = new THREE.DirectionalLight(0xd6e6ff, 1.8);
   sun.position.set(18, 40, 12);
   sun.target.position.set(0, 0, 0);
   sun.shadow.camera.left = -45;
@@ -906,7 +1047,114 @@ function initRenderer() {
     pl.position.set(O + c * CELL + 1, y, O + r * CELL + 1);
     scene.add(pl);
   }
+  /* Post-traitement : rendu multiéchantillonné, bloom, sortie tonemappée */
+  const pr = renderer.getPixelRatio();
+  const rt = new THREE.WebGLRenderTarget(window.innerWidth * pr, window.innerHeight * pr, { type: THREE.HalfFloatType, samples: 4 });
+  composer = new EffectComposer(renderer, rt);
+  composer.addPass(new RenderPass(scene, camera));
+  const bl = CONFIG.render.bloom;
+  bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), bl.strength, bl.radius, bl.threshold);
+  composer.addPass(bloomPass);
+  composer.addPass(new OutputPass());
   applyShadowOption();
+}
+/* Ciel étoilé, planète, hologramme central et poussière en suspension */
+function buildSky() {
+  const stars = makeTexture(1024, (ctx, s) => {
+    ctx.fillStyle = '#02040a';
+    ctx.fillRect(0, 0, s, s);
+    const neb = ctx.createRadialGradient(s * 0.3, s * 0.35, 0, s * 0.3, s * 0.35, s * 0.35);
+    neb.addColorStop(0, 'rgba(70,40,140,0.45)');
+    neb.addColorStop(0.5, 'rgba(30,60,140,0.2)');
+    neb.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = neb;
+    ctx.fillRect(0, 0, s, s);
+    for (let k = 0; k < 2600; k++) {
+      const b = Math.random();
+      ctx.fillStyle = b > 0.97 ? '#ffffff' : b > 0.85 ? '#cfe3ff' : '#6f84a8';
+      const r = b > 0.97 ? 1.6 : 0.8;
+      ctx.fillRect(Math.random() * s, Math.random() * s, r, r);
+    }
+  });
+  stars.wrapS = THREE.RepeatWrapping;
+  stars.repeat.set(3, 1);
+  const sky = new THREE.Mesh(new THREE.SphereGeometry(140, 32, 16), new THREE.MeshBasicMaterial({ map: stars, side: THREE.BackSide, fog: false, depthWrite: false }));
+  sky.renderOrder = -1;
+  scene.add(sky);
+  const planetTex = makeTexture(512, (ctx, s) => {
+    const g = ctx.createLinearGradient(0, 0, 0, s);
+    g.addColorStop(0, '#ffb36b');
+    g.addColorStop(0.45, '#c2552e');
+    g.addColorStop(1, '#3a1430');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, s, s);
+    for (let y = 0; y < s; y += 6) {
+      ctx.globalAlpha = Math.random() * 0.25;
+      ctx.fillStyle = Math.random() < 0.5 ? '#ffe2b0' : '#5a1d2a';
+      ctx.fillRect(0, y, s, rnd(2, 6));
+    }
+    ctx.globalAlpha = 1;
+  });
+  const planet = new THREE.Mesh(new THREE.SphereGeometry(22, 48, 32), new THREE.MeshStandardMaterial({ map: planetTex, emissive: 0x3a1408, roughness: 0.9, metalness: 0, fog: false }));
+  planet.position.set(-70, 48, -95);
+  planet.rotation.z = 0.3;
+  scene.add(planet);
+  const halo = new THREE.Mesh(GEO.plane, new THREE.MeshBasicMaterial({ map: texs.glow, color: 0xff8a4a, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false, fog: false }));
+  halo.scale.setScalar(78);
+  halo.position.copy(planet.position);
+  halo.lookAt(0, 0, 0);
+  scene.add(halo);
+  const ring = new THREE.Mesh(new THREE.RingGeometry(28, 40, 64), new THREE.MeshBasicMaterial({ color: 0xd9a27a, transparent: true, opacity: 0.35, side: THREE.DoubleSide, fog: false, depthWrite: false }));
+  ring.position.copy(planet.position);
+  ring.rotation.set(1.2, 0.3, 0.2);
+  scene.add(ring);
+  decor.planet = planet;
+  /* Hologramme au-dessus de la plateforme centrale */
+  const holo = new THREE.Group();
+  holo.position.set(O + 20 * CELL, 5.6, O + 18 * CELL);
+  const holoMat = new THREE.MeshBasicMaterial({ color: 0xff9a3d, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
+  const r1 = new THREE.Mesh(new THREE.TorusGeometry(1.6, 0.03, 8, 64), holoMat);
+  const r2 = new THREE.Mesh(new THREE.TorusGeometry(1.2, 0.02, 8, 64), holoMat);
+  r1.rotation.x = HALF_PI;
+  r2.rotation.x = HALF_PI * 0.6;
+  const label = makeTexture(512, (ctx, s) => {
+    ctx.clearRect(0, 0, s, s);
+    ctx.font = '700 84px "Segoe UI", Arial, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffb46b';
+    ctx.fillText('SIGMA', s / 2, s / 2 + 20);
+    ctx.font = '600 28px "Segoe UI", Arial, sans-serif';
+    ctx.fillStyle = '#9fd8ff';
+    ctx.fillText('SECTEUR 7  ·  ZONE DE QUARANTAINE', s / 2, s / 2 + 70);
+  });
+  const sign = new THREE.Mesh(GEO.plane, new THREE.MeshBasicMaterial({ map: label, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
+  sign.scale.setScalar(3.2);
+  holo.add(r1, r2, sign);
+  scene.add(holo);
+  decor.holo = holo;
+  /* Poussière lumineuse */
+  const n = 700, pos = new Float32Array(n * 3);
+  for (let k = 0; k < n; k++) {
+    pos[k * 3] = rnd(O, -O); pos[k * 3 + 1] = rnd(0.2, 8); pos[k * 3 + 2] = rnd(O, -O);
+  }
+  const dg = new THREE.BufferGeometry();
+  dg.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  const dust = new THREE.Points(dg, new THREE.PointsMaterial({ color: 0x9fc8ff, size: 0.06, map: texs.glow, transparent: true, opacity: 0.6, blending: THREE.AdditiveBlending, depthWrite: false }));
+  scene.add(dust);
+  decor.dust = dust;
+}
+function animateDecor(dt) {
+  decor.t += dt;
+  if (decor.holo) {
+    decor.holo.rotation.y += dt * 0.4;
+    decor.holo.position.y = 5.6 + Math.sin(decor.t * 1.3) * 0.12;
+  }
+  if (decor.dust) {
+    decor.dust.rotation.y += dt * 0.01;
+    decor.dust.position.y = Math.sin(decor.t * 0.2) * 0.4;
+  }
+  if (decor.planet) decor.planet.rotation.y += dt * 0.01;
+  if (texs.screen) texs.screen.offset.x = (texs.screen.offset.x + dt * 0.04) % 1;
 }
 function applyShadowOption() {
   const size = opts.shadows;
@@ -926,6 +1174,10 @@ function resize() {
   renderer.setSize(window.innerWidth, window.innerHeight, false);
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
+  if (composer) {
+    composer.setPixelRatio(renderer.getPixelRatio());
+    composer.setSize(window.innerWidth, window.innerHeight);
+  }
 }
 window.addEventListener('resize', resize);
 
@@ -1001,6 +1253,7 @@ function playDisable() { tone(1500, 0.45, 'sawtooth', 0.25, 0, 200); noiseBurst(
 function playHurt() { tone(90, 0.4, 'sawtooth', 0.35); tone(94, 0.4, 'sawtooth', 0.2); }
 function playPickup() { tone(523, 0.12, 'sine', 0.15); tone(659, 0.12, 'sine', 0.15, 0.06); tone(784, 0.12, 'sine', 0.15, 0.12); }
 function playDroneBip() { tone(2400, 0.05, 'sine', 0.08); }
+function playAgentShot() { noiseBurst(0.07, 0.35, 'bandpass', 1400, 1.5); tone(700, 0.05, 'square', 0.08, 0, 250); }
 function playWhistle() { tone(900, 0.25, 'sine', 0.12, 0, 1400); }
 function playRumble() { tone(55, 0.8, 'sawtooth', 0.18); noiseBurst(0.8, 0.25, 'lowpass', 200, 1); }
 function playRoar() { tone(60, 1.2, 'sawtooth', 0.3, 0, 40); noiseBurst(1.0, 0.3, 'lowpass', 300, 1); }
@@ -1040,6 +1293,7 @@ function initGeometry() {
   GEO.ring = new THREE.RingGeometry(0.85, 1, 32);
   GEO.octa = new THREE.OctahedronGeometry(0.28, 0);
   GEO.barBar = new THREE.PlaneGeometry(1, 0.09);
+  GEO.capsule = new THREE.CapsuleGeometry(0.5, 1, 4, 10);
 }
 
 /* ================= Particules, douilles, décals (InstancedMesh, sans allocation) ================= */
@@ -1296,19 +1550,23 @@ const ENEMY_POOL_N = CONFIG.ai.poolSize;
 const enemies = [];
 function makeRobotMats() {
   return {
-    body: new THREE.MeshStandardMaterial({ color: 0x8c9ab0, metalness: 0.6, roughness: 0.35, transparent: true }),
+    body: new THREE.MeshStandardMaterial({ color: 0x8c9ab0, metalness: 0.7, roughness: 0.3, envMapIntensity: 0.6, transparent: true }),
     glow: new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true }),
     weak: new THREE.MeshBasicMaterial({ color: 0xfff1a8, transparent: true })
   };
 }
 function buildRobot(type, m) {
   const g = new THREE.Group();
+  /* Les modèles sont décrits face à +z ; le regard des robots est -z */
+  const body = new THREE.Group();
+  body.rotation.y = Math.PI;
+  g.add(body);
   const add = (geo, mat, x, y, z, sx, sy, sz, shadow = false) => {
     const me = new THREE.Mesh(geo, mat);
     me.position.set(x, y, z);
     me.scale.set(sx, sy, sz);
     me.castShadow = shadow;
-    g.add(me);
+    body.add(me);
     return me;
   };
   if (type === 'drone') {
@@ -1335,6 +1593,36 @@ function buildRobot(type, m) {
     add(GEO.sphere, m.weak, 0, 2.1, 0, 0.28, 0.28, 0.28);
     add(GEO.box, m.body, 0, 1.65, 0.7, 0.15, 0.15, 0.9);
     add(GEO.box, m.glow, 0, 1.4, 0.71, 1.22, 0.06, 0.05);
+  } else if (type === 'agent') {
+    /* Agent androïde : membres sur pivots pour l'animation de marche */
+    const limb = (x, y, z, len, r) => {
+      const pivot = new THREE.Group();
+      pivot.position.set(x, y, z);
+      const me = new THREE.Mesh(GEO.capsule, m.body);
+      me.scale.set(r * 2, len / 2, r * 2);
+      me.position.y = -len / 2;
+      me.castShadow = true;
+      pivot.add(me);
+      body.add(pivot);
+      return pivot;
+    };
+    const lLeg = limb(-0.11, 0.92, 0, 0.9, 0.085);
+    const rLeg = limb(0.11, 0.92, 0, 0.9, 0.085);
+    add(GEO.box, m.body, 0, 0.98, 0, 0.32, 0.18, 0.2, true);
+    add(GEO.capsule, m.body, 0, 1.28, 0, 0.42, 0.28, 0.26, true);
+    add(GEO.box, m.glow, 0, 1.33, 0.13, 0.22, 0.05, 0.02);
+    add(GEO.box, m.body, 0, 1.3, -0.15, 0.26, 0.32, 0.1, true);
+    add(GEO.box, m.glow, 0, 1.36, -0.205, 0.14, 0.03, 0.01);
+    add(GEO.cyl, m.body, 0, 1.52, 0, 0.06, 0.08, 0.06);
+    add(GEO.sphere, m.body, 0, 1.67, 0, 0.14, 0.16, 0.15, true);
+    add(GEO.box, m.weak, 0, 1.68, 0.12, 0.18, 0.05, 0.04);
+    const lArm = limb(-0.25, 1.46, 0, 0.6, 0.065);
+    const rArm = limb(0.25, 1.46, 0, 0.6, 0.065);
+    lArm.rotation.set(-1.15, 0, -0.35);
+    rArm.rotation.set(-1.25, 0, 0.15);
+    add(GEO.box, m.body, 0.1, 1.28, 0.42, 0.07, 0.1, 0.62);
+    add(GEO.box, m.glow, 0.1, 1.335, 0.42, 0.075, 0.015, 0.4);
+    g.userData.limbs = [lLeg, rLeg, lArm, rArm];
   } else {
     /* Titan : modèle en unités locales, le groupe est mis à l'échelle 2 */
     add(GEO.box, m.body, 0, 1.1, 0, 1.4, 1.0, 1.2, true);
@@ -1394,7 +1682,7 @@ let cur = 0;
 let switchT = 0;
 let combo = { streak: 0, timer: 0, mult: 1 };
 const wstate = [];
-const vm = { models: [], muzzle: [], muzzleT: 0, kick: 0, recoilY: 0, anchor: [] };
+const vm = { models: [], muzzle: [], muzzleT: 0, kick: 0, light: null, swayX: 0, swayY: 0, sx: 0, sy: 0 };
 
 function resetWeapons() {
   wstate.length = 0;
@@ -1406,42 +1694,83 @@ function resetWeapons() {
 
 /* Modèles d'armes en vue subjective, attachés à la caméra */
 function buildViewmodels() {
+  const glove = new THREE.MeshStandardMaterial({ color: 0x1a1f28, roughness: 0.75, metalness: 0.1 });
+  const sleeve = new THREE.MeshStandardMaterial({ color: 0x2b3a55, roughness: 0.6, metalness: 0.2 });
+  const UP = new THREE.Vector3(0, 1, 0);
+  /* Segment de bras entre deux points (capsule orientée) */
+  const segment = (mat, a, b, r) => {
+    const d = new THREE.Vector3(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+    const len = d.length();
+    const me = new THREE.Mesh(GEO.capsule, mat);
+    me.position.set((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2);
+    me.quaternion.setFromUnitVectors(UP, d.normalize());
+    me.scale.set(r * 2, len / 2, r * 2);
+    return me;
+  };
+  const hands = (g, left) => {
+    g.add(mesh(GEO.sphere, glove, 0, -0.125, -0.085, 0.05, 0.045, 0.065));
+    g.add(segment(sleeve, [0.01, -0.14, -0.06], [0.16, -0.36, 0.22], 0.05));
+    g.add(mesh(GEO.sphere, glove, left[0], left[1], left[2], 0.048, 0.042, 0.065));
+    g.add(segment(sleeve, [left[0] - 0.01, left[1] - 0.02, left[2] + 0.03], [-0.2, -0.36, 0.05], 0.048));
+  };
   const shapes = [
     (g, m, glow) => {
-      g.add(mesh(GEO.box, m.gunDark, 0, 0, -0.2, 0.09, 0.1, 0.42));
-      g.add(mesh(GEO.cyl, m.gunDark, 0, 0.02, -0.45, 0.025, 0.2, 0.025, Math.PI / 2));
-      g.add(mesh(GEO.box, m.gunDark, 0, -0.13, -0.07, 0.07, 0.14, 0.08));
-      g.add(mesh(GEO.box, glow, 0, 0.06, -0.2, 0.095, 0.02, 0.3));
+      g.add(mesh(GEO.box, m.gunLight, 0, 0.03, -0.24, 0.07, 0.07, 0.34));
+      g.add(mesh(GEO.box, m.gunDark, 0, -0.025, -0.22, 0.065, 0.05, 0.3));
+      g.add(mesh(GEO.cyl, m.gunDark, 0, 0.035, -0.45, 0.018, 0.12, 0.018, Math.PI / 2));
+      g.add(mesh(GEO.cyl, glow, 0, 0.035, -0.41, 0.03, 0.03, 0.03, Math.PI / 2));
+      g.add(mesh(GEO.box, m.gunDark, 0, -0.11, -0.1, 0.055, 0.14, 0.07, 0.25));
+      g.add(mesh(GEO.box, glow, 0, 0.068, -0.24, 0.072, 0.012, 0.22));
+      g.add(mesh(GEO.box, glow, 0.036, 0, -0.15, 0.01, 0.04, 0.08));
+      hands(g, [-0.012, -0.1, -0.12]);
     },
     (g, m, glow) => {
-      g.add(mesh(GEO.box, m.gunLight, 0, 0, -0.25, 0.12, 0.12, 0.6));
-      g.add(mesh(GEO.cyl, m.gunDark, 0, 0, -0.6, 0.07, 0.3, 0.07, Math.PI / 2));
-      g.add(mesh(GEO.box, glow, 0, 0, -0.25, 0.13, 0.03, 0.5));
-      g.add(mesh(GEO.box, m.gunDark, 0, -0.14, -0.08, 0.07, 0.14, 0.08));
+      g.add(mesh(GEO.box, m.gunLight, 0, 0, -0.28, 0.1, 0.12, 0.55));
+      g.add(mesh(GEO.box, m.gunDark, 0, 0.075, -0.3, 0.04, 0.025, 0.4));
+      g.add(mesh(GEO.cyl, m.gunDark, 0, 0.11, -0.22, 0.03, 0.14, 0.03, Math.PI / 2));
+      g.add(mesh(GEO.cyl, glow, 0, 0.11, -0.148, 0.022, 0.006, 0.022, Math.PI / 2));
+      g.add(mesh(GEO.cyl, m.gunDark, 0, 0, -0.65, 0.03, 0.3, 0.03, Math.PI / 2));
+      for (const z of [-0.58, -0.63, -0.68]) g.add(mesh(GEO.cyl, glow, 0, 0, z, 0.065, 0.022, 0.065, Math.PI / 2));
+      g.add(mesh(GEO.box, m.gunDark, 0, -0.11, -0.28, 0.06, 0.14, 0.08, 0.15));
+      g.add(mesh(GEO.box, glow, 0, -0.1, -0.235, 0.062, 0.08, 0.02, 0.15));
+      g.add(mesh(GEO.box, m.gunDark, 0, -0.12, -0.1, 0.055, 0.14, 0.07, 0.3));
+      g.add(mesh(GEO.box, glow, 0, 0.02, -0.3, 0.102, 0.015, 0.4));
+      g.add(mesh(GEO.box, m.gunDark, 0, -0.02, 0.04, 0.07, 0.1, 0.18));
+      hands(g, [-0.02, -0.07, -0.42]);
     },
     (g, m, glow) => {
-      g.add(mesh(GEO.box, m.gunDark, 0, 0, -0.25, 0.15, 0.12, 0.5));
-      g.add(mesh(GEO.cyl, m.gunLight, -0.03, 0.02, -0.55, 0.03, 0.2, 0.03, Math.PI / 2));
-      g.add(mesh(GEO.cyl, m.gunLight, 0.03, 0.02, -0.55, 0.03, 0.2, 0.03, Math.PI / 2));
-      g.add(mesh(GEO.box, glow, 0, 0.09, -0.25, 0.08, 0.02, 0.4));
-      g.add(mesh(GEO.box, m.gunDark, 0, -0.14, -0.08, 0.07, 0.14, 0.08));
+      g.add(mesh(GEO.box, m.gunDark, 0, 0, -0.25, 0.16, 0.14, 0.5));
+      g.add(mesh(GEO.box, m.gunLight, 0, 0.09, -0.28, 0.14, 0.06, 0.42));
+      g.add(mesh(GEO.cyl, m.gunLight, -0.035, 0.01, -0.58, 0.032, 0.28, 0.032, Math.PI / 2));
+      g.add(mesh(GEO.cyl, m.gunLight, 0.035, 0.01, -0.58, 0.032, 0.28, 0.032, Math.PI / 2));
+      for (const z of [-0.36, -0.44]) g.add(mesh(GEO.cyl, glow, 0, 0.01, z, 0.085, 0.02, 0.085, Math.PI / 2));
+      g.add(mesh(GEO.box, m.gunDark, 0, -0.08, -0.45, 0.1, 0.07, 0.16));
+      g.add(mesh(GEO.box, m.gunDark, 0, -0.13, -0.06, 0.055, 0.14, 0.07, 0.3));
+      g.add(mesh(GEO.box, glow, 0, 0.125, -0.28, 0.08, 0.015, 0.3));
+      hands(g, [-0.02, -0.11, -0.45]);
     }
   ];
+  const muzzleZ = [-0.52, -0.84, -0.74];
   shapes.forEach((build, k) => {
     const g = new THREE.Group();
     g.position.set(0.22, -0.2, -0.42);
+    g.scale.setScalar(0.8);
     const glowMat = new THREE.MeshBasicMaterial({ color: CONFIG.weapons[k].color });
     build(g, mats, glowMat);
     const muzzleMat = new THREE.MeshBasicMaterial({ map: texs.glow, color: CONFIG.weapons[k].color, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
     const flash = new THREE.Mesh(GEO.plane, muzzleMat);
-    flash.scale.setScalar(0.22);
-    flash.position.set(0, 0.02, -0.78 - k * 0.02);
+    flash.scale.setScalar(0.26);
+    flash.position.set(0, 0.02, muzzleZ[k]);
     flash.visible = false;
     g.add(flash);
     camera.add(g);
     vm.models.push(g);
     vm.muzzle.push(flash);
   });
+  /* Lumière de bouche : éclaire brièvement le décor à chaque tir */
+  vm.light = new THREE.PointLight(0xffffff, 0, 10, 2);
+  vm.light.position.set(0.2, -0.1, -0.9);
+  camera.add(vm.light);
 }
 function mesh(geo, mat, x, y, z, sx, sy, sz, rx = 0) {
   const m = new THREE.Mesh(geo, mat);
@@ -1518,6 +1847,8 @@ function onMouseMove(e) {
   if (mode !== MODE.PLAY || document.pointerLockElement !== $('game')) return;
   const k = opts.sens * 0.0022;
   player.yaw -= e.movementX * k;
+  vm.swayX += e.movementX;
+  vm.swayY += e.movementY;
   player.pitch = clamp(player.pitch - e.movementY * k * (opts.invert ? -1 : 1), -HALF_PI + 0.01, HALF_PI - 0.01);
 }
 function onWheel(e) {
@@ -1627,9 +1958,11 @@ function updatePlayer(dt) {
   P.dirT = Math.max(0, P.dirT - dt);
 }
 
-function updateCamera(dt) {
+/* alpha : fraction du pas fixe écoulée, pour un rendu lissé entre deux pas de simulation */
+function updateCamera(dt, alpha = 1) {
   const P = player;
-  camera.position.set(P.x, P.feetY + P.eye + P.bobY, P.z);
+  const a = clamp(alpha, 0, 1);
+  camera.position.set(lerp(P.px, P.x, a), lerp(P.pFeet, P.feetY, a) + P.eye + P.bobY, lerp(P.pz, P.z, a));
   camera.rotation.set(P.pitch + P.recoil * DEG, P.yaw + P.recoilYaw * DEG, 0);
   if (Math.abs(camera.fov - P.fov) > 0.01) {
     camera.fov = P.fov;
@@ -1638,13 +1971,22 @@ function updateCamera(dt) {
   /* Recul visuel de l'arme et flash de bouche */
   vm.kick *= Math.exp(-14 * dt);
   const baseX = P.aim ? 0.05 : 0.22;
+  const ks = Math.min(1, 10 * dt);
+  vm.sx += (clamp(-vm.swayX * 0.0005, -0.05, 0.05) - vm.sx) * ks;
+  vm.sy += (clamp(vm.swayY * 0.0005, -0.04, 0.04) - vm.sy) * ks;
+  vm.swayX *= Math.exp(-18 * dt);
+  vm.swayY *= Math.exp(-18 * dt);
+  const walk = P.onGround ? Math.hypot(P.vx, P.vz) / PC.sprint : 0;
+  const bobX = Math.cos(P.bobT * 0.5) * 0.012 * walk * (P.aim ? 0.3 : 1);
+  const bobY = Math.abs(Math.sin(P.bobT * 0.5)) * 0.01 * walk * (P.aim ? 0.3 : 1);
   for (let k = 0; k < vm.models.length; k++) {
     const g = vm.models[k];
     const lower = switchT > 0 && k === cur ? -0.15 * (switchT / PC.switchTime) : 0;
     const reloadDip = wstate[k].reloading ? -0.08 * Math.sin(Math.PI * clamp(1 - wstate[k].reloadT / CONFIG.weapons[k].reload, 0, 1)) : 0;
-    g.position.set(baseX, -0.2 + lower + reloadDip - vm.kick * 0.2, -0.42 + vm.kick * 0.5);
-    g.rotation.x = -vm.kick * 0.6;
+    g.position.set(baseX + vm.sx + bobX, -0.2 + lower + reloadDip - vm.kick * 0.2 + vm.sy - bobY, -0.42 + vm.kick * 0.5);
+    g.rotation.set(-vm.kick * 0.6 + vm.sy * 1.5, vm.sx * 2, vm.sx * 1.5);
   }
+  vm.light.intensity *= Math.exp(-28 * dt);
   vm.muzzleT = Math.max(0, vm.muzzleT - dt);
   const showFlash = vm.muzzleT > 0;
   vm.muzzle[cur].visible = showFlash;
@@ -1716,6 +2058,8 @@ function fireWeapon(w, s, idx) {
   P.recoilYaw = (Math.random() - 0.5) * w.recoil * 0.5;
   vm.kick = Math.min(1, vm.kick + w.kick * 40);
   vm.muzzleT = 0.05;
+  vm.light.color.setHex(w.color);
+  vm.light.intensity = idx === 2 ? 14 : 8;
   spawnShell(ox + aim.rx * 0.1, oy, oz + aim.rz * 0.1, 1);
   if (idx === 2) spawnBurst(ox, oy, oz, 4, 1, 0.6, 0.2, 2);
   playShot(idx);
@@ -1883,8 +2227,8 @@ function damagePlayer(amount, fromX, fromZ) {
 /* ================= Ennemis : IA ================= */
 const AI = CONFIG.ai;
 const W = { n: 0, state: 'break', timer: CONFIG.waves.breakTime, spawnT: 0, spawnIdx: 0,
-  queue: { titan: 0, tank: 0, sentinel: 0, drone: 0 } };
-const TYPE_BODY = { drone: 0x8fa3bb, sentinel: 0x9aa3ad, tank: 0x7d8290, titan: 0x5b4d6b };
+  queue: { titan: 0, tank: 0, sentinel: 0, drone: 0, agent: 0 } };
+const TYPE_BODY = { drone: 0x8fa3bb, sentinel: 0x9aa3ad, tank: 0x7d8290, titan: 0x5b4d6b, agent: 0x5a6680 };
 
 function resetEnemies() {
   for (const e of enemies) {
@@ -1899,7 +2243,7 @@ function activeEnemies() {
   return n;
 }
 function queuedEnemies() {
-  return W.queue.titan + W.queue.tank + W.queue.sentinel + W.queue.drone;
+  return W.queue.titan + W.queue.tank + W.queue.sentinel + W.queue.drone + W.queue.agent;
 }
 function turnTo(cur, target, maxStep) {
   let d = target - cur;
@@ -1910,6 +2254,7 @@ function turnTo(cur, target, maxStep) {
 function faceTowards(e, tx, tz, dt) {
   e.yaw = turnTo(e.yaw, Math.atan2(-(tx - e.x), -(tz - e.z)), AI.turnRate * dt);
 }
+const isRanged = (t) => t === 'sentinel' || t === 'titan' || t === 'agent';
 function setState(e, st, time) {
   e.state = st;
   e.stateT = time;
@@ -1990,8 +2335,9 @@ function enemyShoot(e, def, accuracy) {
   }
   const dx = tx - sx, dy = ty - sy, dz = tz - sz;
   const len = Math.hypot(dx, dy, dz);
-  fireProjectile(PROJ_KIND.ENEMY, sx, sy, sz, dx / len, dy / len, dz / len, CONFIG.proj.enemySpeed, def.damage, true);
-  playWhistle();
+  fireProjectile(PROJ_KIND.ENEMY, sx, sy, sz, dx / len, dy / len, dz / len, def.shotSpeed || CONFIG.proj.enemySpeed, def.damage, true);
+  if (e.type === 'agent') playAgentShot();
+  else playWhistle();
 }
 /* Éventail du titan : cinq projectiles étalés autour de la cible */
 function titanFan(e, def) {
@@ -2037,6 +2383,19 @@ function startCover(e) {
   e.hideT = 0;
   e.pathT = 0;
 }
+/* Fil des éliminations, en haut à droite */
+function pushKillFeed(name, head, color) {
+  const feed = $('killfeed');
+  const el = document.createElement('div');
+  el.className = 'kf';
+  el.style.borderRightColor = '#' + color.toString(16).padStart(6, '0');
+  const who = document.createElement('b');
+  who.textContent = 'TOI';
+  el.append(who, ' ▸ ' + name + (head ? ' ◎' : ''));
+  feed.prepend(el);
+  while (feed.children.length > 5) feed.lastChild.remove();
+  setTimeout(() => el.remove(), 4000);
+}
 function multiplierFor(streak) {
   let m = 1;
   for (const [need, mul] of CONFIG.combo.tiers) if (streak >= need) m = mul;
@@ -2062,7 +2421,7 @@ function damageEnemy(e, dmg, head) {
   if (e.state === ST.PATROL || e.state === ST.SEARCH) setState(e, ST.ALERT, AI.alertTime);
   if (e.type === 'sentinel' && e.hp > 0 && !e.cover) startCover(e);
   if (e.type === 'titan') checkTitanPhase(e);
-  if (e.hp <= 0) killEnemy(e);
+  if (e.hp <= 0) killEnemy(e, head);
 }
 function checkTitanPhase(e) {
   const def = CONFIG.enemies.titan;
@@ -2077,7 +2436,7 @@ function checkTitanPhase(e) {
     playRoar();
   }
 }
-function killEnemy(e) {
+function killEnemy(e, head = false) {
   const def = CONFIG.enemies[e.type];
   e.state = ST.DISABLED;
   e.dispT = 0;
@@ -2089,6 +2448,7 @@ function killEnemy(e) {
   combo.mult = multiplierFor(combo.streak);
   stats.score += def.score * combo.mult;
   stats.kills++;
+  pushKillFeed(e.name, head, e.color);
   const glow = def.glow;
   const r = ((glow >> 16) & 255) / 255, g = ((glow >> 8) & 255) / 255, b = (glow & 255) / 255;
   const cy = e.feetY + def.bodyY;
@@ -2116,7 +2476,7 @@ function updateDisabled(e, dt, def) {
   }
   const part = e.parts[e.type];
   const sink = Math.min(1, e.dispT / 0.6);
-  part.rotation.x = sink * 0.25;
+  part.rotation.x = sink * (e.type === 'agent' ? 1.3 : 0.25);
   part.position.y = -0.25 * sink * def.scale;
   e.mats.glow.opacity = Math.random() < 0.6 ? 1 : 0.2;
   if (e.dispT >= AI.disableTime) {
@@ -2163,7 +2523,11 @@ function updateEnemy(e, dt) {
     case ST.ALERT: updateAlert(e, dt, def); break;
     case ST.CHASE: updateChase(e, dt, def); break;
     case ST.SEARCH: updateSearch(e, dt, def); break;
-    case ST.ATTACK: if (e.type === 'titan') updateTitan(e, dt, def); else updateSentinel(e, dt, def); break;
+    case ST.ATTACK:
+      if (e.type === 'titan') updateTitan(e, dt, def);
+      else if (e.type === 'agent') updateAgent(e, dt, def);
+      else updateSentinel(e, dt, def);
+      break;
     default: break;
   }
   applyEnemyVisuals(e, def);
@@ -2193,7 +2557,7 @@ function updateAlert(e, dt, def) {
     e.pathT = 0;
     return;
   }
-  setState(e, (e.type === 'sentinel' || e.type === 'titan') ? ST.ATTACK : ST.CHASE, 0);
+  setState(e, isRanged(e.type) ? ST.ATTACK : ST.CHASE, 0);
   e.chargeCD = Math.max(e.chargeCD, 1);
 }
 /* Chasse : drone au contact, tank avec charge */
@@ -2254,7 +2618,7 @@ function updateChase(e, dt, def) {
 }
 function updateSearch(e, dt, def) {
   if (e.seen) {
-    setState(e, e.type === 'sentinel' || e.type === 'titan' ? ST.ATTACK : ST.CHASE, 0);
+    setState(e, isRanged(e.type) ? ST.ATTACK : ST.CHASE, 0);
     return;
   }
   e.stateT -= dt;
@@ -2310,6 +2674,46 @@ function updateSentinel(e, dt, def) {
   }
 }
 /* Titan : éventails et charges, un cycle de pause entre les actions */
+/* Agent : strafe gauche-droite, rafales de trois tirs, garde 7 à 20 m */
+function updateAgent(e, dt, def) {
+  const P = player;
+  if (!e.seen) {
+    setState(e, ST.SEARCH, AI.memory);
+    e.pathT = 0;
+    e.burstLeft = 0;
+    return;
+  }
+  const dx = P.x - e.x, dz = P.z - e.z;
+  const d = Math.hypot(dx, dz) || 1;
+  e.strafeT -= dt;
+  if (e.strafeT <= 0) {
+    e.strafe = -e.strafe;
+    e.strafeT = rnd(def.strafeMin, def.strafeMax);
+  }
+  if (d > def.maxRange) {
+    followTo(e, P.x, P.z, def.speed, dt, def);
+  } else {
+    const radial = d > 14 ? 0.6 : d < def.minRange ? -0.8 : 0;
+    const tx = e.x + ((-dz / d) * e.strafe + (dx / d) * radial) * 3;
+    const tz = e.z + ((dx / d) * e.strafe + (dz / d) * radial) * 3;
+    moveTowards(e, tx, tz, def.speed * 0.85, dt, def);
+  }
+  e.yaw = Math.atan2(-dx, -dz);
+  e.shootT -= dt;
+  if (e.shootT <= 0 && e.burstLeft <= 0) {
+    e.burstLeft = def.burst;
+    e.burstT = 0;
+    e.shootT = def.burstInterval;
+  }
+  if (e.burstLeft > 0) {
+    e.burstT -= dt;
+    if (e.burstT <= 0) {
+      enemyShoot(e, def, def.accuracy);
+      e.burstLeft--;
+      e.burstT = def.burstGap;
+    }
+  }
+}
 function updateTitan(e, dt, def) {
   const P = player;
   if (e.stagger > 0) {
@@ -2375,8 +2779,17 @@ function updateTitan(e, dt, def) {
 function applyEnemyVisuals(e, def) {
   const part = e.parts[e.type];
   const hoverY = e.type === 'drone' ? def.hover + Math.sin(e.hoverT += 0.1) * 0.05 : 0;
+  e.hoverY = hoverY;
   e.root.position.set(e.x, e.feetY + hoverY, e.z);
   e.root.rotation.y = e.yaw;
+  if (e.type === 'agent' && e.state !== ST.DISABLED) {
+    const limbs = part.userData.limbs;
+    const sp = Math.hypot(e.vx, e.vz);
+    e.walkT += sp * CONFIG.loop.step * 2.4;
+    const sw = Math.sin(e.walkT) * Math.min(1, sp / 3) * 0.75;
+    limbs[0].rotation.x = sw;
+    limbs[1].rotation.x = -sw;
+  }
   part.scale.setScalar(def.scale);
   const dist = Math.hypot(player.x - e.x, player.z - e.z);
   e.root.visible = dist < CONFIG.render.cullDistance;
@@ -2421,6 +2834,14 @@ function spawnEnemy(type, s) {
   e.mats.body.opacity = 1;
   e.mats.body.emissive.setRGB(0, 0, 0);
   e.mats.glow.color.setHex(def.glow);
+  e.name = TYPE_NAMES[type];
+  e.color = def.glow;
+  if (type === 'agent') {
+    const [name, col] = AGENTS[(Math.random() * AGENTS.length) | 0];
+    e.name = name;
+    e.color = col;
+    e.mats.glow.color.setHex(col);
+  }
   e.mats.glow.opacity = 1;
   e.mats.weak.opacity = 1;
   for (const t of ENEMY_TYPES) e.parts[t].visible = t === type;
@@ -2428,6 +2849,8 @@ function spawnEnemy(type, s) {
   e.parts[type].position.set(0, 0, 0);
   e.parts[type].scale.setScalar(def.scale * 0.05);
   e.root.visible = true;
+  e.px = e.x; e.pz = e.z; e.pFeet = e.feetY; e.hoverY = 0;
+  e.walkT = 0; e.burstLeft = 0; e.burstT = 0; e.strafeT = 0;
   return true;
 }
 function pickSpawnPoint() {
@@ -2450,6 +2873,7 @@ function pickSpawnPoint() {
 function nextQueuedType() {
   if (W.queue.titan > 0) return 'titan';
   if (W.queue.tank > 0) return 'tank';
+  if (W.queue.agent > 0) return 'agent';
   if (W.queue.sentinel > 0) return 'sentinel';
   return 'drone';
 }
@@ -2464,7 +2888,9 @@ function startWave() {
   W.queue.titan = titan;
   W.queue.tank = tank;
   W.queue.sentinel = sentinel;
-  W.queue.drone = total - titan - sentinel - tank;
+  const agent = n >= CONFIG.waves.agentFrom ? Math.floor(n / 2) : 0;
+  W.queue.agent = agent;
+  W.queue.drone = total - titan - sentinel - tank - agent;
   W.state = 'spawn';
   W.spawnT = 0;
   showBanner('Vague ' + n + ' !');
@@ -2522,7 +2948,7 @@ function updateMinimap() {
   }
   for (const e of enemies) {
     if (!e.alive || e.state === ST.DISABLED) continue;
-    ctx.fillStyle = e.type === 'titan' ? '#ff7bf0' : '#ff4d4d';
+    ctx.fillStyle = e.type === 'titan' ? '#ff7bf0' : e.type === 'agent' ? '#3dfff0' : '#ff4d4d';
     const s = e.type === 'titan' ? 6 : 3;
     ctx.fillRect((e.x - O) * MM_SCALE - s / 2, (e.z - O) * MM_SCALE - s / 2, s, s);
   }
@@ -2660,6 +3086,7 @@ function resetRun() {
   P.vx = 0; P.vz = 0; P.vy = 0; P.kbX = 0; P.kbZ = 0;
   P.onGround = true;
   P.peakY = P.feetY;
+  P.px = P.x; P.pz = P.z; P.pFeet = P.feetY;
   P.yaw = Math.atan2(-(0 - P.x), -(0 - P.z));
   P.pitch = 0;
   P.eye = PC.eyeStand;
@@ -2681,7 +3108,8 @@ function resetRun() {
   W.timer = CONFIG.waves.breakTime;
   W.spawnT = 0;
   W.spawnIdx = 0;
-  W.queue.titan = 0; W.queue.tank = 0; W.queue.sentinel = 0; W.queue.drone = 0;
+  W.queue.titan = 0; W.queue.tank = 0; W.queue.sentinel = 0; W.queue.drone = 0; W.queue.agent = 0;
+  $('killfeed').textContent = '';
   hudCache.score = -1;
   hudCache.wave = '';
   hudCache.boss = -1;
@@ -2762,6 +3190,7 @@ function openOptions() {
   $('opt-fov').value = opts.fov;
   $('opt-fps').checked = opts.fps;
   $('opt-shadows').value = String(opts.shadows);
+  $('opt-bloom').checked = opts.bloom;
   refreshOptionLabels();
 }
 function refreshOptionLabels() {
@@ -2779,6 +3208,7 @@ function applyOptionsFromUi() {
   opts.fov = Number($('opt-fov').value);
   opts.fps = $('opt-fps').checked;
   opts.shadows = Number($('opt-shadows').value);
+  opts.bloom = $('opt-bloom').checked;
   refreshOptionLabels();
   applyVolumes();
   applyShadowOption();
@@ -2805,6 +3235,13 @@ function handleAction(action) {
 }
 
 /* ================= Boucle principale ================= */
+/* Position rendue des robots, lissée entre deux pas de simulation */
+function interpolateEnemies(a) {
+  for (const e of enemies) {
+    if (!e.alive || !e.root.visible) continue;
+    e.root.position.set(lerp(e.px, e.x, a), lerp(e.pFeet, e.feetY, a) + e.hoverY, lerp(e.pz, e.z, a));
+  }
+}
 function updateEnemies(dt) {
   for (const e of enemies) updateEnemy(e, dt);
 }
@@ -2815,6 +3252,8 @@ function updateEffects(dt) {
 }
 function step(dt) {
   stats.time += dt;
+  player.px = player.x; player.pz = player.z; player.pFeet = player.feetY;
+  for (const e of enemies) { e.px = e.x; e.pz = e.z; e.pFeet = e.feetY; }
   updatePlayer(dt);
   updateWeapons(dt);
   updateWaves(dt);
@@ -2831,7 +3270,8 @@ function step(dt) {
   }
 }
 function render() {
-  renderer.render(scene, camera);
+  if (opts.bloom && composer) composer.render();
+  else renderer.render(scene, camera);
 }
 function updateMenuCamera(dt) {
   menuYaw += dt * 0.12;
@@ -2859,9 +3299,13 @@ function frame(now) {
       acc -= CONFIG.loop.step;
       step(CONFIG.loop.step);
     }
-    updateCamera(dt);
+    const alpha = acc / CONFIG.loop.step;
+    updateCamera(dt, alpha);
+    interpolateEnemies(alpha);
+    animateDecor(dt);
   } else if (mode === MODE.MENU) {
     updateMenuCamera(dt);
+    animateDecor(dt);
     updateEffects(dt);
   } else {
     acc = 0;
@@ -2888,7 +3332,7 @@ function bindEvents() {
     const b = e.target.closest('[data-action]');
     if (b) handleAction(b.dataset.action);
   });
-  for (const id of ['opt-sens', 'opt-invert', 'opt-music', 'opt-sfx', 'opt-fov', 'opt-fps', 'opt-shadows']) {
+  for (const id of ['opt-sens', 'opt-invert', 'opt-music', 'opt-sfx', 'opt-fov', 'opt-fps', 'opt-shadows', 'opt-bloom']) {
     $(id).addEventListener('input', applyOptionsFromUi);
   }
   window.addEventListener('keydown', onKeyDown);
@@ -2911,6 +3355,7 @@ function init() {
   initRenderer();
   buildMaterials();
   initGeometry();
+  buildSky();
   loadMap();
   initFxMeshes();
   initShocks();
